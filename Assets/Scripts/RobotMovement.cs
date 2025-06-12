@@ -9,6 +9,9 @@ public class RobotMovement : MonoBehaviour
     public float stuckCooldown = 1f; // Thời gian chờ sau khi thoát kẹt
     public float stopDuration = 0.3f; // Thời gian dừng sau va chạm (giây)
     public float rotationSpeed = 5f; // Tốc độ xoay body
+    public float stuckCheckInterval = 1f; // Thời gian kiểm tra bị kẹt
+    public float minMoveDistance = 0.1f; // Khoảng cách tối thiểu để không bị coi là kẹt
+    public float maxSurfaceDistance = 0.5f; // Khoảng cách tối đa di chuyển dọc bề mặt trước khi đổi hướng
 
     private Vector2 direction; // Hướng di chuyển hiện tại
     private Rigidbody2D rb;
@@ -19,32 +22,47 @@ public class RobotMovement : MonoBehaviour
     private bool isStopped; // Trạng thái dừng sau va chạm
     private float stopStartTime; // Thời gian bắt đầu dừng
     private Quaternion targetRotation; // Góc xoay mục tiêu
+    private Vector2 lastPosition; // Vị trí trước đó để theo dõi di chuyển
+    private float stuckTimer; // Bộ đếm thời gian kiểm tra bị kẹt
+    private Vector2 lastCollisionNormal; // Pháp tuyến va chạm gần nhất
+    private Vector2 surfaceStartPosition; // Vị trí bắt đầu di chuyển dọc bề mặt
+    private bool isFollowingSurface; // Trạng thái di chuyển dọc bề mặt
 
     void Start()
     {
         rb = GetComponent<Rigidbody2D>();
         robotCollider = GetComponent<Collider2D>();
+        lastPosition = transform.position;
         // Đặt hướng ban đầu ngẫu nhiên
         direction = Random.insideUnitCircle.normalized;
     }
 
-    void Update()
+    void FixedUpdate()
     {
         // Kiểm tra xem robot có bị kẹt không
-        if (Time.time - lastCollisionTime < stuckThreshold && rb.linearVelocity.magnitude < 0.1f)
+        if (!isStopped)
         {
-            isStuck = true;
-        }
-        else
-        {
-            isStuck = false;
-        }
+            stuckTimer += Time.fixedDeltaTime;
+            if (stuckTimer >= stuckCheckInterval)
+            {
+                if (Vector2.Distance(transform.position, lastPosition) < minMoveDistance)
+                {
+                    ChangeDirection();
+                }
+                lastPosition = transform.position;
+                stuckTimer = 0f;
+            }
 
-        // Nếu bị kẹt, thử thoát ra
-        if (isStuck && Time.time - lastEscapeTime > stuckCooldown)
-        {
-            EscapeStuckSituation();
-            lastEscapeTime = Time.time;
+            // Kiểm tra di chuyển dọc bề mặt
+            if (isFollowingSurface)
+            {
+                float distanceAlongSurface = Vector2.Distance(transform.position, surfaceStartPosition);
+                if (distanceAlongSurface >= maxSurfaceDistance)
+                {
+                    ChangeDirection();
+                    isFollowingSurface = false;
+                }
+            }
         }
 
         // Xử lý trạng thái dừng và xoay sau va chạm
@@ -57,6 +75,7 @@ public class RobotMovement : MonoBehaviour
             if (Time.time - stopStartTime >= stopDuration)
             {
                 isStopped = false; // Kết thúc thời gian dừng
+                isFollowingSurface = false; // Kết thúc theo dõi bề mặt
             }
             else
             {
@@ -65,7 +84,7 @@ public class RobotMovement : MonoBehaviour
                 {
                     float angle = Mathf.Atan2(direction.y, direction.x) * Mathf.Rad2Deg;
                     targetRotation = Quaternion.Euler(0f, 0f, angle);
-                    transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, Time.deltaTime * rotationSpeed);
+                    transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, Time.fixedDeltaTime * rotationSpeed);
                 }
             }
         }
@@ -87,9 +106,11 @@ public class RobotMovement : MonoBehaviour
     {
         lastCollisionTime = Time.time;
 
+        // Lưu pháp tuyến va chạm gần nhất
+        lastCollisionNormal = collision.contacts[0].normal;
+
         // Phản xạ hướng dựa trên pháp tuyến va chạm
-        Vector2 normal = collision.contacts[0].normal;
-        direction = Vector2.Reflect(direction, normal).normalized;
+        direction = Vector2.Reflect(direction, lastCollisionNormal).normalized;
 
         // Kiểm tra xem hướng mới có khả thi không
         RaycastHit2D hit = Physics2D.Raycast(transform.position, direction, raycastDistance);
@@ -102,6 +123,16 @@ public class RobotMovement : MonoBehaviour
         // Bắt đầu trạng thái dừng sau va chạm
         isStopped = true;
         stopStartTime = Time.time;
+        surfaceStartPosition = transform.position; // Đặt vị trí bắt đầu dọc bề mặt
+        isFollowingSurface = true; // Bắt đầu theo dõi di chuyển dọc bề mặt
+    }
+
+    private void ChangeDirection()
+    {
+        isStopped = true;
+        stopStartTime = Time.time; // Đặt lại thời gian dừng
+        direction = Random.insideUnitCircle.normalized; // Thay đổi hướng ngẫu nhiên
+        isFollowingSurface = false; // Dừng theo dõi bề mặt khi thay đổi hướng
     }
 
     private void EscapeStuckSituation()
@@ -126,7 +157,7 @@ public class RobotMovement : MonoBehaviour
 
     private Vector2 FindEscapeDirection()
     {
-        // Quét 8 hướng xung quanh robot (0, 45, 90, 135, 180, 225, 270, 315 độ)
+        // Quét 8 hướng xung quanh robot, ưu tiên hướng vuông góc với pháp tuyến va chạm
         float bestDistance = 0f;
         Vector2 bestDirection = direction;
 
@@ -134,12 +165,35 @@ public class RobotMovement : MonoBehaviour
         {
             float angle = i * 45f * Mathf.Deg2Rad;
             Vector2 testDirection = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)).normalized;
-            RaycastHit2D hit = Physics2D.Raycast(transform.position, testDirection, raycastDistance);
-
-            if (hit.collider == null || hit.distance > bestDistance)
+            // Ưu tiên hướng có góc lớn với pháp tuyến va chạm (tránh song song)
+            if (lastCollisionNormal != Vector2.zero)
             {
-                bestDistance = hit.distance;
-                bestDirection = testDirection;
+                float dotProduct = Vector2.Dot(testDirection, lastCollisionNormal);
+                if (Mathf.Abs(dotProduct) < 0.5f) // Ưu tiên hướng không quá song song (góc > 60 độ)
+                {
+                    RaycastHit2D hit = Physics2D.Raycast(transform.position, testDirection, raycastDistance);
+                    if (hit.collider == null || hit.distance > bestDistance)
+                    {
+                        bestDistance = hit.distance;
+                        bestDirection = testDirection;
+                    }
+                }
+            }
+        }
+
+        // Nếu không tìm được hướng tốt, quét lại tất cả
+        if (bestDistance == 0f)
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                float angle = i * 45f * Mathf.Deg2Rad;
+                Vector2 testDirection = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)).normalized;
+                RaycastHit2D hit = Physics2D.Raycast(transform.position, testDirection, raycastDistance);
+                if (hit.collider == null || hit.distance > bestDistance)
+                {
+                    bestDistance = hit.distance;
+                    bestDirection = testDirection;
+                }
             }
         }
 
